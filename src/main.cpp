@@ -1,122 +1,142 @@
-#include <SFML/Graphics/RenderWindow.hpp>
+#include <cstdlib>
+#include <cmath>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+
 #include <SFML/System/Clock.hpp>
-#include <SFML/Window/Event.hpp>
-#include <SFML/OpenGL.hpp>
+#include <SFML/System/Time.hpp>
+#include <SFML/Window.hpp>
+#include <SFML/Graphics.hpp>
 
-#include <fstream>
+#include <GL/glew.h>
 
-#include "Fluid.hpp"
+#include "FluidCPU.hpp"
 
-void LoadSettings ( int &N, int &cell_size, bool &smooth, bool &draw_speed, float &visc, bool &force );
 
-int main()
+/* Returns relative mouse position in the window (in [0,1]x[0,1]) */
+sf::Vector2f getRelativeMousePos (sf::Window const& window);
+bool isMouseInWindow (sf::Window const& window);
+
+int main(int argc, char *argv[])
 {
-    int N, cell_size;
-    bool draw_speed, smooth, force;
-    float visc;
+    /* Creation of the windows and contexts */
+    sf::ContextSettings openGL2DContext(0, 0, 0, //no depth, no stencil, no antialiasing
+                                        3, 0, //openGL 3.0 requested
+                                        sf::ContextSettings::Default);
+    sf::RenderWindow window(sf::VideoMode(512,512), "Navier-Stokes",
+                            sf::Style::Titlebar | sf::Style::Close,
+                            openGL2DContext);
+    window.setVerticalSyncEnabled(true);
+    //window.setFramerateLimit(10);
+    glewInit();
 
-    LoadSettings ( N, cell_size, smooth, draw_speed, visc, force );
+    sf::Font font;
+    if (!font.loadFromFile("fonts/font.ttf")) {
+        std::cerr << "Warning: unable to load fonts/font.ttf." << std::endl;
+    }
+    sf::Text text("", font, 18);
 
-    sf::Window app;
+    FluidCPU fluidCPU(100, 100, 0.0001f);
+    Fluid& fluid = fluidCPU;
 
-    app.create ( sf::VideoMode(N*cell_size*(draw_speed+1), N*cell_size),
-                 "Stable Fluid",
-                 sf::Style::Close );
-
-    glDisable (GL_POINT_SMOOTH);
-    gluOrtho2D (0, N*cell_size*(draw_speed+1),
-                0, N*cell_size);
-
-    Fluid *fluid = new Fluid( N, visc, force);
-
-    sf::Event event;
-    sf::Clock clock;
-    sf::Vector2i mouse = sf::Mouse::getPosition (app)/7;
-
-    do
-    {
-        while (app.pollEvent(event))
-        {
-            switch (event.type)
-            {
+    /* Main loop */
+    unsigned int loops = 0;
+    const sf::Clock clock; //for average fps computation
+    sf::Clock fpsClock;
+    sf::Vector2f mousePos = getRelativeMousePos(window);
+    bool drawDensity = true, drawVelocity = false;
+    while (window.isOpen()) {
+        sf::Event event;
+        while (window.pollEvent(event)) {
+            switch (event.type) {
                 case sf::Event::Closed:
-                    app.close();
-                    break;
+                    window.close();
+                break;
+                case sf::Event::KeyReleased:
+                    if (event.key.code == sf::Keyboard::Escape) {
+                        window.close();
+                    }
+                    else if (event.key.code == sf::Keyboard::R) {
+                        fluid.reset();
+                    }
+                    else if (event.key.code == sf::Keyboard::I) {
+                        drawDensity = !drawDensity;
+                    }
+                    else if (event.key.code == sf::Keyboard::O) {
+                        drawVelocity = !drawVelocity;
+                    }
+                break;
+                case sf::Event::MouseButtonPressed:
+                    if (event.mouseButton.button == sf::Mouse::Left) {
+                        fluid.addDensity(mousePos, 0.001f, 1.f);
+                    }
+                break;
                 case sf::Event::MouseMoved:
-                    if ( sf::Mouse::isButtonPressed(sf::Mouse::Right) )
-                    {
-                        sf::Vector2f vel (sf::Mouse::getPosition(app).x-mouse.x,
-                                          - (sf::Mouse::getPosition(app).y-mouse.y));
+                {
+                    sf::Vector2f newMousePos = getRelativeMousePos(window);
 
-                        fluid->AddForce (mouse.x/cell_size, N - mouse.y/cell_size,
-                                        vel.x/150.f, vel.y/150.f);
+                    if (isMouseInWindow(window)) {
+                        if (sf::Mouse::isButtonPressed(sf::Mouse::Left)) {
+                            fluid.addDensity(newMousePos, 0.001f, 1.f);
+                        } else if (sf::Mouse::isButtonPressed(sf::Mouse::Right)) {
+                            fluid.addVelocity(mousePos, newMousePos - mousePos);
+                        }
                     }
-                    break;
-                case sf::Event::KeyPressed:
-                    if ( event.key.code == sf::Keyboard::R )
-                    {
-                        LoadSettings ( N, cell_size, smooth, draw_speed, visc, force );
-                        app.create ( sf::VideoMode(N*cell_size*(draw_speed+1), N*cell_size),
-                                     "Stable Fluid",
-                                     sf::Style::Close );
-
-                        glDisable (GL_POINT_SMOOTH);
-                        gluOrtho2D (0, N*cell_size*(draw_speed+1),
-                                    0, N*cell_size);
-
-                        delete fluid;
-                        fluid = new Fluid( N, visc, force);
-                    }
+                    
+                    mousePos = newMousePos;
+                }
+                break;
                 default:
                     break;
             }
-            mouse = sf::Mouse::getPosition (app);
+        }
+
+        float dt = fpsClock.getElapsedTime().asSeconds();
+        fpsClock.restart();
+
+        fluid.update(dt);
+
+        {
+            float fps = 1.f / fpsClock.getElapsedTime().asSeconds();
+            std::stringstream s;
+            s << "fps: " << static_cast<int>(fps) << std::endl <<std::endl;
+            s << "size: " << fluid.getSize().x << "x" << fluid.getSize().y << std::endl;
+            s << "draw density (I): " << drawDensity << std::endl;
+            s << "draw velocity (O): " << drawVelocity;
+            
+            text.setString(s.str());
+        }
+        
+        window.clear();
+        fluid.draw(drawDensity, drawVelocity);
+
+        window.pushGLStates();
+        window.draw(text);
+        window.popGLStates();
+
+        window.display();
+
+        ++loops;
+
     }
 
-        if ( sf::Mouse::isButtonPressed(sf::Mouse::Left) )
-            fluid->AddDensity ( mouse.x/cell_size, N - mouse.y/cell_size );
+    std::cout << "average fps: " << static_cast<float>(loops) / clock.getElapsedTime().asSeconds() << std::endl;
 
-        fluid->UpdateVelocity ();
-        fluid->UpdateDensity ();
-
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            fluid->DrawDensity (0, 0, cell_size, smooth);
-            if ( draw_speed )
-                fluid->DrawVelocity (cell_size*N, 0, cell_size);
-        app.display();
-
-        //std::cout << 1.f/clock.restart().asSeconds() << std::endl;
-    } while ( app.isOpen() );
-
-    delete fluid;
-
-    return 0;
+    return EXIT_SUCCESS;
 }
 
-void LoadSettings ( int &N, int &cell_size, bool &smooth, bool &draw_speed, float &visc, bool &force)
+sf::Vector2f getRelativeMousePos (sf::Window const& window)
 {
-    std::ifstream file ( "lois.txt", std::ios::in );
+    sf::Vector2i mousePos = sf::Mouse::getPosition(window);
+    sf::Vector2f pos(mousePos.x, window.getSize().y - mousePos.y);
+    pos.x /= window.getSize().x;
+    pos.y /= window.getSize().y;
+    return pos;
+}
 
-    N = 100;
-    cell_size = 5;
-    smooth = true;
-    draw_speed = false;
-    visc = 0.000001;
-    force = false;
-
-    if ( file )
-    {
-        file.ignore(100000, ':');
-        file >> N;
-        file.ignore(100000, ':');
-        file >> cell_size;
-        file.ignore(100000, ':');
-        file >> smooth;
-        file.ignore(100000, ':');
-        file >> draw_speed;
-        file.ignore(100000, ':');
-        file >> visc;
-        file.ignore(100000, ':');
-        file >> force;
-    }
+bool isMouseInWindow (sf::Window const& window)
+{
+    sf::Vector2i pos = sf::Mouse::getPosition(window);
+    return pos.x >= 0 && pos.y >= 0 && pos.x < (int)window.getSize().x && pos.y < (int)window.getSize().y;
 }

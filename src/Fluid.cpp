@@ -1,268 +1,170 @@
 #include "Fluid.hpp"
 
-#include <SFML/OpenGL.hpp>
+#include <iostream>
+#include <sstream>
 
-using namespace std;
-using namespace sf;
+#include "GLHelper.hpp"
 
-Fluid::Fluid ( int N, float visc, bool force):
-            _N(N),
-            _visc (visc),
-            _sources ((_N+2)*(_N+2), 0.f),
-            _forces ((_N+2)*(_N+2), Vector2f(0.f,0.f))
+
+Fluid::Fluid(unsigned int nbCols, unsigned int nbLines, float viscosity):
+            _nbLines(nbLines),
+            _nbCols(nbCols),
+            _posBufferID(-1),
+            _indexBufferID(-1),
+            _densBufferID(-1),
+            _viscosity(viscosity)
 {
-    _dens = new vector<float> ((_N+2)*(_N+2), 0.f);
-    for ( int x = N/2-20 ; x <= N/2+20 ; x++ )
-        for ( int y = N/2-20 ; y <= N/2+20 ; y++ )
-            (*_dens)[Index(x,y)] = 1.f;
-    _dens_prev = new vector<float> (*_dens);
-
-    _velx = new vector<float> ((_N+2)*(_N+2), 0.f);
-    _velx_prev=  new vector<float> (*_velx);
-
-    _vely = new vector<float> ((_N+2)*(_N+2), 0.f);
-    _vely_prev = new vector<float> (*_vely);
-
-    if ( force )
-    {
-        _forces[Index(5,N/2-1)] = Vector2f ( 0.01f, 0.f );
-        _forces[Index(5,N/2+0)] = Vector2f ( 0.02f, 0.f );
-        _forces[Index(5,N/2+1)] = Vector2f ( 0.01f, 0.f );
+    /* Shader loading */
+    if (!_densityShader.loadFromFile("shaders/displayDensity.vert", "shaders/displayDensity.frag")) {
+        std::cerr << "Error: couldn't load displayDensity shader." << std::endl;
     }
+    if (!_velocityShader.loadFromFile("shaders/displayVelocity.vert", "shaders/displayVelocity.frag")) {
+        std::cerr << "Error: couldn't load displayVelocity shader." << std::endl;
+    }
+
+    /* Textures loading */
+    if (!_palette.loadFromFile("textures/palette.png")) {
+        std::cerr << "Error: couldn't load palette.png." << std::endl;
+    }
+    _palette.setSmooth(true);
+    
+    /* Buffers for displaying */
+    int nbPtX = _nbCols, nbPtY = _nbLines;
+    float stepX = 1.f / static_cast<float>(nbPtX-1), stepY = 1.f / static_cast<float>(nbPtY-1);
+    std::vector<glm::vec2> positions(nbPtX * nbPtY);
+    for (int iX = 0 ; iX < nbPtX ; ++iX) {
+        for (int iY = 0 ; iY < nbPtY ; ++iY) {
+            int index = iX*nbPtY + iY;
+            positions[index].x = 2.f * (static_cast<float>(iX) * stepX - 0.5f);
+            positions[index].y = 2.f * (static_cast<float>(iY) * stepY - 0.5f);
+        }
+    }
+
+    std::vector<glm::ivec3> indexes(2 * (nbPtX-1) * (nbPtY-1));
+    for (int iX = 0 ; iX < nbPtX-1 ; ++iX) {
+        for (int iY = 0 ; iY < nbPtY-1 ; ++iY) {
+            int index = iX*(nbPtY-1) + iY;
+            indexes[2*index+0] = glm::ivec3(iX,iX,iX+1)*nbPtY + glm::ivec3(iY+1, iY, iY);
+            indexes[2*index+1] = glm::ivec3(iX,iX+1,iX+1)*nbPtY + glm::ivec3(iY+1, iY, iY+1);
+        }
+    }
+
+    GLCHECK(glGenBuffers(1, &_posBufferID));
+    GLCHECK(glGenBuffers(1, &_indexBufferID));
+    GLCHECK(glGenBuffers(1, &_densBufferID)); //mapped to colors in the shader
+    GLCHECK(glGenBuffers(1, &_velBufferID));
+    
+    GLCHECK(glBindBuffer(GL_ARRAY_BUFFER, _posBufferID));
+    GLCHECK(glBufferData(GL_ARRAY_BUFFER, positions.size()*sizeof(glm::vec2), positions.data(), GL_STATIC_DRAW));
+    GLCHECK(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _indexBufferID));
+    GLCHECK(glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexes.size()*sizeof(glm::ivec3), indexes.data(), GL_STATIC_DRAW));
+    GLCHECK(glGenBuffers(1, &_densBufferID)); //corresponding texture pixel coordinates
+    GLCHECK(glBindBuffer(GL_ARRAY_BUFFER, _densBufferID));
+    GLCHECK(glBufferData(GL_ARRAY_BUFFER, nbCols*nbLines*sizeof(float), NULL, GL_DYNAMIC_DRAW));
+    GLCHECK(glBindBuffer(GL_ARRAY_BUFFER, _velBufferID));
+    GLCHECK(glBufferData(GL_ARRAY_BUFFER, 2*positions.size()*sizeof(glm::vec2), NULL, GL_DYNAMIC_DRAW));
+    
+    GLCHECK(glBindBuffer(GL_ARRAY_BUFFER, 0));
+    GLCHECK(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
 }
 
 Fluid::~Fluid ()
 {
-    delete _dens;
-    delete _dens_prev;
-    delete _velx;
-    delete _velx_prev;
-    delete _vely;
-    delete _vely_prev;
-}
-
-void Fluid::DrawDensity ( int left, int bottom, int cell_size, bool smooth) const
-{
-    if ( !smooth )
-    {
-        glPointSize ( cell_size);
-        glBegin ( GL_POINTS );
-        for ( int iY = 1 ; iY <= _N ; iY++ )
-            for ( int iX = 1 ; iX <= _N ; iX++ )
-            {
-                glColor3f ( 2.f*(*_dens)[Index(iX,iY)], 2.f*(*_dens)[Index(iX,iY)]-1.f, 0 );
-                glVertex2d ( left + cell_size*iX, bottom + cell_size*iY );
-            }
-        glEnd ();
+    if (_posBufferID != 0) {
+        GLCHECK(glDeleteBuffers(1, &_posBufferID));
     }
-    else
-    {
-        glBegin ( GL_QUADS );
-        for ( int iY = 1 ; iY <= _N ; iY++ )
-            for ( int iX = 1 ; iX <= _N ; iX++ )
-            {
-                glColor3f ( 2.f*(*_dens)[Index(iX,iY)], 2.f*(*_dens)[Index(iX,iY)]-1.f, 0 );
-                glVertex2d ( left + cell_size*iX, bottom + cell_size*iY );
-
-                glColor3f ( 2.f*(*_dens)[Index(iX-1,iY)], 2.f*(*_dens)[Index(iX-1,iY)]-1.f, 0 );
-                glVertex2d ( left + cell_size*(iX-1), bottom + cell_size*iY );
-
-                glColor3f ( 2.f*(*_dens)[Index(iX-1,iY-1)], 2.f*(*_dens)[Index(iX-1,iY-1)]-1.f, 0 );
-                glVertex2d ( left + cell_size*(iX-1), bottom + cell_size*(iY-1) );
-
-                glColor3f ( 2.f*(*_dens)[Index(iX,iY-1)], 2.f*(*_dens)[Index(iX,iY-1)]-1.f, 0 );
-                glVertex2d ( left + cell_size*iX, bottom + cell_size*(iY-1) );
-            }
-        glEnd ();
+    if (_indexBufferID != 0) {
+        GLCHECK(glDeleteBuffers(1, &_indexBufferID));
     }
-}
-void Fluid::DrawVelocity ( int left, int bottom, float cell_size ) const
-{
-    glLineWidth ( 1.f );
-    glBegin ( GL_LINES );
-    glColor3f ( 1.f, 1.f, 1.f );
-    for ( int iY = 1 ; iY <= _N ; iY++ )
-        for ( int iX = 1 ; iX <= _N ; iX++ )
-        {
-            Vector2f A(iX,iY);
-            glVertex2d ( left + A.x*cell_size, bottom + A.y*cell_size );
-            A.x += (*_velx)[Index(iX,iY)]*100.f;
-            A.y += (*_vely)[Index(iX,iY)]*100.f;
-            glVertex2d ( left + A.x*cell_size, bottom + A.y*cell_size );
-        }
-    glEnd ();
-}
-
-void Fluid::UpdateDensity ()
-{
-    AddSources ();
-    swap (_dens, _dens_prev);
-    Diffuse ( *_dens, *_dens_prev, 0 );
-    swap (_dens, _dens_prev);
-    Advect ( *_dens, *_dens_prev, *_velx, *_vely, 0 );
-}
-void Fluid::UpdateVelocity ()
-{
-    AddForces ();
-    swap (_velx, _velx_prev);
-    Diffuse  ( *_velx, *_velx_prev, 1 );
-    swap (_vely, _vely_prev);
-    Diffuse  ( *_vely, *_vely_prev, 2 );
-
-    Project ();
-
-    swap (_velx, _velx_prev);
-    swap (_vely, _vely_prev);
-    Advect (*_velx, *_velx_prev, *_velx_prev, *_vely_prev, 1);
-    Advect (*_vely, *_vely_prev, *_velx_prev, *_vely_prev, 2);
-
-    Project ();
-}
-
-void Fluid::AddDensity ( int x, int y )
-{
-    if ( x >= 1 && x <= _N && 1 >= 0 && y <= _N)
-    {
-        (*_dens)[Index(x,y)] = 1.f;
-        (*_dens)[Index(x-1,y)] = 1.f;
-        (*_dens)[Index(x-1,y-1)] = 1.f;
-        (*_dens)[Index(x,y-1)] = 1.f;
+    if (_densBufferID != 0) {
+        GLCHECK(glDeleteBuffers(1, &_densBufferID));
     }
-}
-void Fluid::AddForce ( int x, int y, float velx, float vely )
-{
-    float k=0.5;
-
-    if ( x >= 0 && x < _N && y >= 0 && y < _N)
-    {
-        (*_velx)[Index(x,y)] += velx; (*_vely)[Index(x,y)] += vely;
-
-        (*_velx)[Index(x-1,y-1)] += velx*k; (*_vely)[Index(x-1,y-1)] += vely*k;
-        (*_velx)[Index(x+0,y-1)] += velx*k; (*_vely)[Index(x+0,y-1)] += vely*k;
-        (*_velx)[Index(x+1,y-1)] += velx*k; (*_vely)[Index(x+1,y-1)] += vely*k;
-
-        (*_velx)[Index(x-1,y+1)] += velx*k; (*_vely)[Index(x-1,y+1)] += vely*k;
-        (*_velx)[Index(x+0,y+1)] += velx*k; (*_vely)[Index(x+0,y+1)] += vely*k;
-        (*_velx)[Index(x+1,y+1)] += velx*k; (*_vely)[Index(x+1,y+1)] += vely*k;
-
-        (*_velx)[Index(x-1,y)] += velx*k; (*_vely)[Index(x-1,y)] += vely*k;
-        (*_velx)[Index(x+1,y)] += velx*k; (*_vely)[Index(x+1,y)] += vely*k;
+    if (_velBufferID != 0) {
+        GLCHECK(glDeleteBuffers(1, &_velBufferID));
     }
 }
 
-inline int Fluid::Index ( int x, int y ) const
+sf::Vector2i Fluid::getSize() const
 {
-    return y*(_N+2) + x;
+    return sf::Vector2i(_nbCols, _nbLines);
 }
 
-void Fluid::AddSources ()
+void Fluid::draw(bool drawDensity, bool drawIntensity)
 {
-    for ( int iC = _sources.size()-1 ; iC >= 0 ; iC-- )
-    {
-        (*_dens)[iC] += _sources[iC];
 
-        if ( (*_dens)[iC] > 1.f )
-            (*_dens)[iC] = 1.f;
-        else if ( (*_dens)[iC] < 0.f )
-            (*_dens)[iC] = 0.f;
+    GLCHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    GLCHECK(glClearColor(0, 0, 0, 1.0));
+    
+    if (drawDensity)
+        Fluid::drawDensity();
+    if (drawIntensity)
+        Fluid::drawIntensity();
+}
+
+void Fluid::drawDensity()
+{
+    fetchDensityBuffer();
+
+    GLuint displayShaderHandle = _densityShader.getNativeHandle();
+    if (displayShaderHandle == 0 || displayShaderHandle == (GLuint)(-1))
+        return;
+
+    sf::Shader::bind(&_densityShader);
+    _densityShader.setParameter("palette", _palette);
+    
+    GLuint posALoc = glGetAttribLocation(displayShaderHandle, "vPos");
+    GLuint densALoc = glGetAttribLocation(displayShaderHandle, "vDensity");
+
+    if(posALoc != (GLuint)(-1)) {
+        GLCHECK(glEnableVertexAttribArray(posALoc));
+        GLCHECK(glBindBuffer(GL_ARRAY_BUFFER, _posBufferID));
+        GLCHECK(glVertexAttribPointer(posALoc, 2, GL_FLOAT, GL_FALSE, 0, (void*)0));
     }
-}
-
-void Fluid::AddForces ()
-{
-    for ( int iC = _sources.size()-1 ; iC >= 0 ; iC-- )
-    {
-        (*_velx)[iC] += _forces[iC].x;
-        (*_vely)[iC] += _forces[iC].y;
+    if(densALoc != (GLuint)(-1)) {
+        GLCHECK(glEnableVertexAttribArray(densALoc));
+        GLCHECK(glBindBuffer(GL_ARRAY_BUFFER, _densBufferID));
+        GLCHECK(glVertexAttribPointer(densALoc, 1, GL_FLOAT, GL_FALSE, 0, (void*)0));
     }
-}
+    GLCHECK(glDisable(GL_DEPTH_TEST));
+    GLCHECK(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _indexBufferID));
+    GLCHECK(glDrawElements(GL_TRIANGLES, 6*(_nbCols-1)*(_nbLines-1), GL_UNSIGNED_INT, (void*)0));
 
-void Fluid::Diffuse ( std::vector<float> &next, std::vector<float> &prev, int b )
-{
-    for ( int k=0 ; k<20 ; k++ )
-    {
-        for ( int iY = 1 ; iY <= _N ; iY++ )
-            for ( int iX = 1 ; iX <= _N ; iX++ )
-                next[Index(iX,iY)] = (prev[Index(iX,iY)] + _visc*(prev[Index(iX+1,iY)]+prev[Index(iX-1,iY)]+prev[Index(iX,iY+1)]+prev[Index(iX,iY-1)]))/(1.f+4.f*_visc);
-
-        SetBnd ( next, b );
+    if (densALoc != (GLuint)(-1)) {
+        GLCHECK(glDisableVertexAttribArray(densALoc));
     }
+    if (posALoc != (GLuint)(-1)) {
+        GLCHECK(glDisableVertexAttribArray(posALoc));
+    }
+    GLCHECK(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+    GLCHECK(glBindBuffer(GL_ARRAY_BUFFER, 0));
+    sf::Shader::bind(0);
 }
 
-void Fluid::Advect ( std::vector<float> &next, std::vector<float> &prev, std::vector<float> &velx, std::vector<float> &vely, int b )
+void Fluid::drawIntensity()
 {
-    float a = 1.f * static_cast<float>(_N);
+    fetchVelocityBuffer();
 
-    for ( int iY = 1 ; iY <= _N ; iY++ )
-        for ( int iX = 1 ; iX <= _N ; iX++ )
-        {
-            float x = static_cast<float>(iX) - a*velx[Index(iX,iY)],
-                  y = static_cast<float>(iY) - a*vely[Index(iX,iY)];
+    GLuint displayShaderHandle = _velocityShader.getNativeHandle();
+    if (displayShaderHandle == 0 || displayShaderHandle == (GLuint)(-1))
+        return;
 
-            if ( x < 0.5 )
-                x = 0.5;
-            if ( x > static_cast<float>(_N)+0.5 )
-                x = static_cast<float>(_N)+0.5;
+    sf::Shader::bind(&_velocityShader);
+    
+    GLuint posALoc = glGetAttribLocation(displayShaderHandle, "vPos");
 
-            if ( y < 0.5 )
-                y = 0.5;
-            if ( y > static_cast<float>(_N)+0.5 )
-                y = static_cast<float>(_N)+0.5;
-
-            int x0 = x, y0 = y, x1 = x0+1, y1 = y0+1;
-            float s1 = x - static_cast<float>(x0), s0 = 1.f-s1,
-                  t1 = y - static_cast<float>(y0), t0 = 1.f-t1;
-
-            next[Index(iX,iY)] = s0*( t0*prev[Index(x0,y0)] + t1*prev[Index(x0,y1)] )
-                               + s1*( t0*prev[Index(x1,y0)] + t1*prev[Index(x1,y1)] );
-        }
-
-    SetBnd ( next, b);
-}
-
-void Fluid::Project ()
-{
-    for ( int iY = 1 ; iY <= _N ; iY++ )
-        for ( int iX = 1 ; iX <= _N ; iX++ )
-        {
-            (*_vely_prev)[Index(iX,iY)] = -0.5*( (*_velx)[Index(iX+1,iY)] - (*_velx)[Index(iX-1,iY)] + (*_vely)[Index(iX,iY+1)] - (*_vely)[Index(iX,iY-1)]);
-            (*_velx_prev)[Index(iX,iY)] = 0.f;
-        }
-
-    SetBnd  ( *_vely_prev, 0);
-    SetBnd  ( *_velx_prev, 0);
-
-    for ( int k=0 ; k<20 ; k++ )
-    {
-        for ( int iY = 1 ; iY <= _N ; iY++ )
-            for ( int iX = 1 ; iX < _N ; iX++ )
-                (*_velx_prev)[Index(iX,iY)] = ( (*_vely_prev)[Index(iX,iY)] + (*_velx_prev)[Index(iX-1,iY)]+(*_velx_prev)[Index(iX+1,iY)]+(*_velx_prev)[Index(iX,iY-1)]+(*_velx_prev)[Index(iX,iY+1)] )/4.f;
-        SetBnd  ( *_velx_prev, 0 );
+    if(posALoc != (GLuint)(-1)) {
+        GLCHECK(glEnableVertexAttribArray(posALoc));
+        GLCHECK(glBindBuffer(GL_ARRAY_BUFFER, _velBufferID));
+        GLCHECK(glVertexAttribPointer(posALoc, 2, GL_FLOAT, GL_FALSE, 0, (void*)0));
     }
 
-    for ( int iY = 1 ; iY < _N ; iY++ )
-        for ( int iX = 1 ; iX < _N ; iX++ )
-        {
-            (*_velx)[Index(iX,iY)] -= 0.5 * ( (*_velx_prev)[Index(iX+1,iY)]-(*_velx_prev)[Index(iX-1,iY)] );
-            (*_vely)[Index(iX,iY)] -= 0.5 * ( (*_velx_prev)[Index(iX,iY+1)]-(*_velx_prev)[Index(iX,iY-1)] );
-        }
+    GLCHECK(glDisable(GL_DEPTH_TEST));
+    GLCHECK(glDrawArrays(GL_LINES, 0, 2*_nbLines*_nbCols));
 
-    SetBnd  ( *_velx, 1 );
-    SetBnd  ( *_vely, 2 );
-}
-
-void Fluid::SetBnd ( std::vector<float> &field, int b )
-{
-    for ( int i=1 ; i <= _N ; i++ )
-    {
-        field[Index(0   ,i)] = (b==1) ? -field[Index(1,i)] : field[Index(1,i)];
-        field[Index(_N+1,i)] = (b==1) ? -field[Index(_N,i)] : field[Index(_N,i)];
-        field[Index(i,0   )] = (b==2) ? -field[Index(i,1)] : field[Index(i,1)];
-        field[Index(i,_N+1)]  = (b==2) ? -field[Index(i,_N)] : field[Index(i,_N)];
+    if (posALoc != (GLuint)(-1)) {
+        GLCHECK(glDisableVertexAttribArray(posALoc));
     }
-
-    field[Index(0,0)] = (field[Index(1,0)]+field[Index(0,1)])/2.f;
-    field[Index(0,_N+1)] = (field[Index(1,_N+1)]+field[Index(0,_N)])/2.f;
-    field[Index(_N+1,0)] = (field[Index(_N,0)]+field[Index(_N+1,1)])/2.f;
-    field[Index(_N+1,_N+1)] = (field[Index(_N,_N+1)]+field[Index(_N+1,_N)])/2.f;
+    GLCHECK(glBindBuffer(GL_ARRAY_BUFFER, 0));
+    sf::Shader::bind(0);
 }
+

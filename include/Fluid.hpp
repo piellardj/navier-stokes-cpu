@@ -1,47 +1,57 @@
 #ifndef FLUID_HPP_INCLUDED
 #define FLUID_HPP_INCLUDED
 
-#include <vector>
-#include <SFML/System/Vector2.hpp>
+#include <SFML/Graphics/Texture.hpp>
+#include <SFML/Graphics/Shader.hpp>
 
+#include <GL/glew.h>
+#include "glm.hpp"
+#include <SFML/OpenGL.hpp>
+
+
+/* Handles the drawing part of the simulation */
 class Fluid
 {
-    private:
-        int _N;
+    public:
+        Fluid(unsigned int nbCols, unsigned int nbLines, float visc);
+        virtual ~Fluid();
 
-        float _visc;//vitesse de diffusion, entre 0 et 1/4
+        sf::Vector2i getSize () const;
 
-        std::vector<float>        *_dens, *_dens_prev,
-                                  *_velx, *_velx_prev,
-                                  *_vely, *_vely_prev;
+        virtual void reset() = 0;
 
-        std::vector<float>        _sources;
-        std::vector<sf::Vector2f> _forces;
+        /* position normalisée */
+        virtual void addDensity (sf::Vector2f pos, float radius, float strength=0.1f) = 0;
+        virtual void addVelocity (sf::Vector2f pos, sf::Vector2f dir) = 0;
+        virtual void update(float dt) = 0;
+
+        virtual void draw(bool drawDensity=true, bool drawIntensity=false);
+
+    protected:
+        virtual void drawDensity();
+        virtual void drawIntensity();
+
+        /* Updates OpenGL buffers for drawing */
+        virtual void fetchDensityBuffer() = 0;
+        virtual void fetchVelocityBuffer() = 0;
+
+
+    protected:
+        const unsigned int _nbLines;
+        const unsigned int _nbCols;
+
+        GLuint _posBufferID;
+        GLuint _indexBufferID;
+        GLuint _densBufferID;
+
+        GLuint _velBufferID;
+
+        sf::Texture _palette;
+        sf::Shader _densityShader;
+        sf::Shader _velocityShader;
 
     public:
-        Fluid ( int N, float visc, bool );
-        ~Fluid ();
-
-        void DrawDensity ( int left, int bottom, int cell_size, bool smooth) const;
-        void DrawVelocity ( int left, int bottom,float cell_size) const;
-
-        void UpdateDensity ();
-        void UpdateVelocity ();
-
-        void AddDensity ( int x, int y );
-        void AddForce( int x, int y, float velx, float vely );
-
-    private:
-        int Index ( int x, int y ) const;
-
-        void AddSources ();
-        void AddForces ();
-        void Diffuse ( std::vector<float> &next, std::vector<float> &prev, int b );
-        void Advect ( std::vector<float> &next, std::vector<float> &prev, std::vector<float> &velx, std::vector<float> &vely, int b);
-
-        void Project ();
-
-        void SetBnd ( std::vector<float> &field, int b );
+        float _viscosity;
 };
 
 #endif // FLUID_HPP_INCLUDED
