@@ -1,8 +1,8 @@
 # navier-stokes-cpu
 Fluid simulation by solving 2D Navier-Stokes equations on CPU.
-C++, SFML, OpenGL.
+C++, SFML 2.3.2, OpenGL 3+, glm.
 
-This is a very old project of mine, monothreaded and using legacy OpenGL.
+This is a very old project of mine, monothreaded for now.
 
 I am currently updating this project and two versions are in the works:
  - multi-threaded version using OpenMP
